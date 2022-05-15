@@ -22,14 +22,21 @@ void pio_i2c_resume_after_error(PIO pio, uint sm);
 void pio_i2c_put_or_err(PIO pio, uint sm, uint16_t data);
 uint8_t pio_i2c_get(PIO pio, uint sm);
 
-extern const int PIO_I2C_FINAL_LSB;
-extern const int PIO_I2C_DATA_LSB;
-#define pio_i2c_prepare_byte(txbyte, final) (uint16_t)(((txbyte) << PIO_I2C_DATA_LSB) | (((final) == true) << PIO_I2C_FINAL_LSB) | 1u)
+// Each I2C byte is transmitted with additional information
+// as a 16-bit half-word to the PIO FIFO
+// Conversions to a 2-byte half-word for the PIO state machine
+#define PIO_I2C_ICOUNT_LSB 10
+#define PIO_I2C_FINAL_LSB 9
+#define PIO_I2C_DATA_LSB 1
+#define PIO_I2C_NAK_LSB 0
+#define pio_i2c_prepare_byte(txbyte, final) (uint16_t)(((txbyte) << PIO_I2C_DATA_LSB) | (((final) == true) << PIO_I2C_FINAL_LSB) | (1u << PIO_I2C_NAK_LSB))
+#define pio_i2c_prepare_instr(num_instr) (uint16_t)(((num_instr-1)<<PIO_I2C_ICOUNT_LSB))
 
 // ----------------------------------------------------------------------------
 // Transaction-level functions
-
-bool pio_i2c_dma_ongoing();
+bool pio_i2c_dma_ongoing_any();
+bool pio_i2c_dma_ongoing(PIO pio, uint sm);
+bool pio_i2c_dma_check_error(PIO pio, uint sm);
 int pio_i2c_dma_stop(PIO pio, uint sm, uint pin_hs, uint dma_chan);
 int pio_i2c_write_dma_start(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint dma_chan);
 int pio_i2c_write_blocking(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint8_t *txbuf, uint len);

@@ -125,7 +125,7 @@ static inline void i2c_program_init(PIO pio, uint sm, uint offset, uint pin_sda,
     gpio_set_oeover(pin_scl, GPIO_OVERRIDE_INVERT);
     pio_sm_set_pins_with_mask(pio, sm, 0, both_pins);
 
-    // Clear IRQ flag before starting, errors assert interrupt 0, but
+    // Clear IRQ flag before starting, errors assert interrupt 0+sm, but
     // unless we are in DMA mode, we don't want to assert a system
     // level irq.
     pio_interrupt_clear(pio, sm);

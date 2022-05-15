@@ -10,20 +10,17 @@
 #include "hardware/gpio.h"
 #include "pio_i2c.h"
 
-// Each I2C byte is transmitted with additional information
-// as a 16-bit half-word to the PIO FIFO
-const int PIO_I2C_ICOUNT_LSB = 10;
-const int PIO_I2C_FINAL_LSB  = 9;
-const int PIO_I2C_DATA_LSB   = 1;
-const int PIO_I2C_NAK_LSB    = 0;
-
 // DMA transfers do not block, but we need to surface
 // PIO errors to stop the DMA machinery and let
 // callers check on completion.
-PIO i2c_irq_pio;
-uint i2c_irq_sm, i2c_irq_pin_hs, i2c_irq_dma_chan;
-bool i2c_dma_ongoing = false;
-
+struct pio_i2c_irq_info_struct {
+  PIO pio;
+  uint sm;
+  uint pin_hs;
+  uint dma_chan;
+  bool dma_ongoing;
+  bool dma_error;
+} pio_i2c_irq_info = { .dma_ongoing = false, .dma_error = false };
 
 bool pio_i2c_check_error(PIO pio, uint sm) {
     return pio_interrupt_get(pio, sm);
@@ -77,7 +74,7 @@ void pio_i2c_start(PIO pio, uint sm, uint pin_hs) {
     // Then do a high speed start.
 
     // Slow start
-    pio_i2c_put_or_err(pio, sm, 6u << PIO_I2C_ICOUNT_LSB); // Escape code for 7 instruction sequence
+    pio_i2c_put_or_err(pio, sm, pio_i2c_prepare_instr(7)); // Escape code for 7 instruction sequence
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_0S1_10]);     // We are already idle state, just pull SDA low
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_W1P1_10]);    // Allow clock stretch
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_0S1_10]);     // Still SDA low
@@ -88,7 +85,7 @@ void pio_i2c_start(PIO pio, uint sm, uint pin_hs) {
 
     // first four bits of master code
     for (int i = 0; i < 4; ++i) {
-      pio_i2c_put_or_err(pio, sm, 7u << PIO_I2C_ICOUNT_LSB); // Escape code for 8 instruction sequence
+      pio_i2c_put_or_err(pio, sm, pio_i2c_prepare_instr(8)); // Escape code for 8 instruction sequence
       pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_0S0_8]);     // Keep clock low
       pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_0S0_8]);     // Keep clock low, set data low
       pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_0S1_10]);    // Set clock high
@@ -100,7 +97,7 @@ void pio_i2c_start(PIO pio, uint sm, uint pin_hs) {
     }
     // last four bits of master code
     for (int i = 0; i < 4; ++i) {
-      pio_i2c_put_or_err(pio, sm, 7u << PIO_I2C_ICOUNT_LSB); // Escape code for 8 instruction sequence
+      pio_i2c_put_or_err(pio, sm, pio_i2c_prepare_instr(8)); // Escape code for 8 instruction sequence
       pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_0S0_8]);     // Keep clock low
       pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_1S0_8]);     // Keep clock low, set data high
       pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_1S1_10]);    // Set clock high
@@ -114,7 +111,7 @@ void pio_i2c_start(PIO pio, uint sm, uint pin_hs) {
     // Slow nack
     // I2C-HS Spec says if an ACK is received here, the switch to HS mode should not succeed.
     // Right now this code does not check for an ACK, instead assuming it is a NACK.
-    pio_i2c_put_or_err(pio, sm, 7u << PIO_I2C_ICOUNT_LSB); // Escape code for 8 instruction sequence
+    pio_i2c_put_or_err(pio, sm, pio_i2c_prepare_instr(8)); // Escape code for 8 instruction sequence
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_1S0_8]);     // Keep clock low, let data high
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_1S0_8]);     // Keep clock low
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_1S1_9]);     // Set clock high
@@ -129,14 +126,14 @@ void pio_i2c_start(PIO pio, uint sm, uint pin_hs) {
     // enable SCL to be current sourcing when set high. Toggle GPIO for that.
     if (pin_hs < NUM_BANK0_GPIOS)
       gpio_put(pin_hs, true);
-    pio_i2c_put_or_err(pio, sm, 1u << PIO_I2C_ICOUNT_LSB);                            // Escape code for 2 instruction sequence
+    pio_i2c_put_or_err(pio, sm, pio_i2c_prepare_instr(2));                            // Escape code for 2 instruction sequence
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC1_SD0_HS]);    // We are already in idle state, just pull SDA low
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC0_SD0_HS]);    // Also pull clock low so we can present data
 }
 
 void pio_i2c_stop(PIO pio, uint sm, uint pin_hs) {
     // High speed stop
-    pio_i2c_put_or_err(pio, sm, 2u << PIO_I2C_ICOUNT_LSB);
+    pio_i2c_put_or_err(pio, sm, pio_i2c_prepare_instr(3));                            // Escape code for 3 instruction sequence
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC0_SD0_HS]);    // SDA is unknown; pull it down
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC1_SD0_HS]);    // Release clock
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC1_SD1_HS]);    // Release SDA to return to idle state
@@ -174,16 +171,23 @@ int pio_i2c_write_blocking(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint8_t 
     return err;
 }
 
+void i2c_irq_handler_internal(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
+    pio_i2c_irq_info.dma_error = true;
+    (void)pio_i2c_dma_stop(pio, sm, pin_hs, dma_chan);
+    pio_interrupt_clear(pio, sm);
+    return;
+}
+
 void i2c_irq_handler() {
-    (void)pio_i2c_dma_stop(i2c_irq_pio, i2c_irq_sm, i2c_irq_pin_hs, i2c_irq_dma_chan);
-    pio_interrupt_clear(i2c_irq_pio, i2c_irq_sm);
+    i2c_irq_handler_internal(pio_i2c_irq_info.pio, pio_i2c_irq_info.sm, pio_i2c_irq_info.pin_hs, pio_i2c_irq_info.dma_chan);
     return;
 }
 
 int pio_i2c_disable_sys_irq(PIO pio, uint sm) {
-    uint pio_irq = PIO0_IRQ_0 + ((pio_get_index(pio)<<1 + sm) & 0x3);
+    uint pio_irq = PIO0_IRQ_0 + ((pio_get_index(pio)<<1) & 0x2);
     if (irq_is_enabled(pio_irq)) {
         pio_set_irq0_source_enabled(pio, pis_interrupt0 + sm, false);
+
         irq_set_enabled(pio_irq, false);
         irq_remove_handler(pio_irq, i2c_irq_handler);
     }
@@ -193,13 +197,18 @@ int pio_i2c_disable_sys_irq(PIO pio, uint sm) {
 }
 
 int pio_i2c_enable_sys_irq(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
-    uint pio_irq = PIO0_IRQ_0 + ((pio_get_index(pio)<<1) & 0x3);
-    if (irq_is_enabled(pio_irq))
+    uint pio_irq = PIO0_IRQ_0 + ((pio_get_index(pio)<<1) & 0x2);
+    if (irq_is_enabled(pio_irq)) {
+      assert(pio_i2c_irq_info.pio == pio);
+      assert(pio_i2c_irq_info.sm == sm);
       return 0;
-    i2c_irq_pio = pio;
-    i2c_irq_sm = sm;
-    i2c_irq_pin_hs = pin_hs;
-    i2c_irq_dma_chan = dma_chan;
+    }
+    pio_i2c_irq_info.pio = pio;
+    pio_i2c_irq_info.sm = sm;
+    pio_i2c_irq_info.pin_hs = pin_hs;
+    pio_i2c_irq_info.dma_chan = dma_chan;
+    pio_i2c_irq_info.dma_ongoing = true;
+    pio_i2c_irq_info.dma_error = false;
     irq_set_exclusive_handler(pio_irq, i2c_irq_handler);
     irq_set_enabled(pio_irq, true);
     pio_set_irq0_source_enabled(pio, pis_interrupt0 + sm, true);
@@ -210,6 +219,8 @@ int pio_i2c_enable_sys_irq(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
 
 int pio_i2c_write_dma_start(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint dma_chan) {
     int err = 0;
+    if (pio_i2c_irq_info.dma_ongoing)
+      return -1; // Another DMA transfer is ongoing
     if (pio_i2c_disable_sys_irq(pio, sm))
       return -1;
     pio_i2c_start(pio, sm, pin_hs);
@@ -217,7 +228,6 @@ int pio_i2c_write_dma_start(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint dm
     pio_i2c_put16(pio, sm, (addr << 2) | 1u);
     err = pio_i2c_check_error(pio, sm);
     if (!err) {
-      i2c_dma_ongoing = true;
       dma_channel_start(dma_chan);
       err = pio_i2c_enable_sys_irq(pio, sm, pin_hs, dma_chan);
     }
@@ -228,13 +238,27 @@ int pio_i2c_write_dma_start(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint dm
       return 0;
 }
 
-bool pio_i2c_dma_ongoing() {
-    return i2c_dma_ongoing;
+bool pio_i2c_dma_ongoing_any() {
+    return pio_i2c_irq_info.dma_ongoing;
+}
+
+bool pio_i2c_dma_ongoing(PIO pio, uint sm) {
+    if (pio_i2c_irq_info.pio == pio && pio_i2c_irq_info.sm == sm)
+      return pio_i2c_irq_info.dma_ongoing;
+    else
+      return false;
+}
+
+bool pio_i2c_dma_check_error(PIO pio, uint sm) {
+    if (pio_i2c_irq_info.pio == pio && pio_i2c_irq_info.sm == sm)
+      return pio_i2c_irq_info.dma_error;
+    else
+      return false;
 }
 
 int pio_i2c_dma_stop(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
     int err = 0;
-    i2c_dma_ongoing = false;
+    pio_i2c_irq_info.dma_ongoing = false;
     dma_channel_abort(dma_chan);
     err = pio_i2c_disable_sys_irq(pio, sm);
     if (!err) {
@@ -245,6 +269,7 @@ int pio_i2c_dma_stop(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
         err = -1;
         pio_i2c_resume_after_error(pio, sm);
         pio_i2c_stop(pio, sm, pin_hs);
+        pio_i2c_irq_info.dma_error = true;
     }
     return err;
 }
