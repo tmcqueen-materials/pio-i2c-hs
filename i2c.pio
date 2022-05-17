@@ -51,6 +51,7 @@
 ; and last bit of each 9-bit segment, but to conserve
 ; instructions, we allow slaves to stretch clock on any bit.
 ;
+; [1] https://github.com/raspberrypi/pico-feedback/issues/238
 
 do_nack:
     jmp y-- entry_point        ; Continue if NAK was expected
@@ -60,13 +61,13 @@ do_byte:
     set x, 7                   ; Loop 8 times
 bitloop:
     out pindirs, 1         [1] ; Serialise write data (all-ones if reading)
-    wait 1 pin, 1   side 1     ; SCL rising, allow clock to be stretched (wait samples early, so this takes 2+ cycles)
+    wait 1 pin, 1   side 1     ; SCL rising, allow clock to be stretched (wait samples early, so this takes 2+ cycles [1])
     in pins, 1                 ; Sample read data in middle of SCL pulse
     jmp x-- bitloop side 0 [2] ; SCL falling edge
 
     ; Handle ACK pulse
     out pindirs, 1             ; On reads, we provide the ACK.
-    wait 1 pin, 1   side 1     ; SCL rising, Allow clock to be stretched (wait samples early, so this takes 2+ cycles)
+    wait 1 pin, 1   side 1     ; SCL rising, Allow clock to be stretched (wait samples early, so this takes 2+ cycles [1])
     jmp pin do_nack side 0     ; Test SDA for ACK/NAK, fall through if ACK
 
 public entry_point:

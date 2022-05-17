@@ -138,7 +138,8 @@ void pio_i2c_stop(PIO pio, uint sm, uint pin_hs) {
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC1_SD0_HS]);    // Release clock
     pio_i2c_put_or_err(pio, sm, set_scl_sda_program_instructions[I2C_SC1_SD1_HS]);    // Release SDA to return to idle state
     // At this point, the master (us) should resconnect low speed devices from the bus, and
-    // disable SCL to be current sourcing when set high. Toggle GPIO for that.
+    // disable SCL to be current sourcing when set high. Toggle GPIO for that. The circuit
+    // should be designed to *not* glitch the bus.
     if (pin_hs < NUM_BANK0_GPIOS)
       gpio_put(pin_hs, false);
 };
@@ -152,6 +153,8 @@ static void pio_i2c_wait_idle(PIO pio, uint sm) {
 
 int pio_i2c_write_blocking(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint8_t *txbuf, uint len) {
     int err = 0;
+    if (pio_i2c_dma_ongoing(pio, sm))
+      return -1; // A DMA transfer is ongoing
     pio_i2c_start(pio, sm, pin_hs);
     pio_i2c_rx_enable(pio, sm, false);
     pio_i2c_put16(pio, sm, (addr << 2) | 1u);
@@ -219,7 +222,7 @@ int pio_i2c_enable_sys_irq(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
 
 int pio_i2c_write_dma_start(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint dma_chan) {
     int err = 0;
-    if (pio_i2c_irq_info.dma_ongoing)
+    if (pio_i2c_dma_ongoing(pio, sm))
       return -1; // Another DMA transfer is ongoing
     if (pio_i2c_disable_sys_irq(pio, sm))
       return -1;
@@ -258,8 +261,8 @@ bool pio_i2c_dma_check_error(PIO pio, uint sm) {
 
 int pio_i2c_dma_stop(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
     int err = 0;
-    pio_i2c_irq_info.dma_ongoing = false;
-    dma_channel_abort(dma_chan);
+    dma_channel_abort(dma_chan); // This probably needs refinement in light of https://github.com/raspberrypi/pico-feedback/issues/224
+                                 // and the possibility of DMA chains.
     err = pio_i2c_disable_sys_irq(pio, sm);
     if (!err) {
       pio_i2c_stop(pio, sm, pin_hs);
@@ -271,11 +274,14 @@ int pio_i2c_dma_stop(PIO pio, uint sm, uint pin_hs, uint dma_chan) {
         pio_i2c_stop(pio, sm, pin_hs);
         pio_i2c_irq_info.dma_error = true;
     }
+    pio_i2c_irq_info.dma_ongoing = false;
     return err;
 }
 
 int pio_i2c_read_blocking(PIO pio, uint sm, uint pin_hs, uint8_t addr, uint8_t *rxbuf, uint len) {
     int err = 0;
+    if (pio_i2c_dma_ongoing(pio, sm))
+      return -1; // A DMA transfer is ongoing
     pio_i2c_start(pio, sm, pin_hs);
     pio_i2c_rx_enable(pio, sm, true);
     while (!pio_sm_is_rx_fifo_empty(pio, sm))
